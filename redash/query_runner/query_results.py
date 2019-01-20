@@ -49,7 +49,7 @@ def get_query_results(user, query_id, bring_from_cache):
     query = _load_query(user, query_id)
     if bring_from_cache:
         if query.latest_query_data_id is not None:
-            results = query.latest_query_data.data
+            results = query.latest_query_data.get_data()
         else:
             raise Exception("No cached result available for query {}.".format(query.id))
     else:

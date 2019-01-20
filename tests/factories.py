@@ -24,8 +24,14 @@ class ModelFactory(object):
     def create(self, **override_kwargs):
         kwargs = self._get_kwargs(override_kwargs)
         obj = self.model(**kwargs)
-        db.session.add(obj)
-        db.session.commit()
+
+        # use Model defined save method if exists! if not fall back to session.add
+        save_op = getattr(obj, "save", None)
+        if callable(save_op):
+            obj.save()
+        else:
+            db.session.add(obj)
+            db.session.commit()
         return obj
 
 

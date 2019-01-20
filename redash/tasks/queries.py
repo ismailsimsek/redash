@@ -364,11 +364,12 @@ def cleanup_query_results():
 
     logging.info("Running query results clean up (removing maximum of %d unused results, that are %d days old or more)",
                  settings.QUERY_RESULTS_CLEANUP_COUNT, settings.QUERY_RESULTS_CLEANUP_MAX_AGE)
-
+# @TODO make sure result_set_data is deleted!! turn this to loop instead!! or use after_delete event!
     unused_query_results = models.QueryResult.unused(settings.QUERY_RESULTS_CLEANUP_MAX_AGE).limit(settings.QUERY_RESULTS_CLEANUP_COUNT)
-    deleted_count = models.QueryResult.query.filter(
-        models.QueryResult.id.in_(unused_query_results.subquery())
-    ).delete(synchronize_session=False)
+    deleted_count = 0
+    for q in unused_query_results:
+        models.QueryResult.query.get(q.id).delete()
+        deleted_count+=1
     models.db.session.commit()
     logger.info("Deleted %d unused query results.", deleted_count)
 

@@ -38,6 +38,7 @@ from .mixins import BelongsToOrgMixin, TimestampMixin
 from .organizations import Organization
 from .types import Configuration, MutableDict, MutableList, PseudoJSON
 from .users import (AccessPermission, AnonymousUser, ApiUser, Group, User)  # noqa
+from .query_result_data import *
 
 logger = logging.getLogger(__name__)
 
@@ -232,7 +233,7 @@ class DataSourceGroup(db.Model):
 
 
 @python_2_unicode_compatible
-@generic_repr('id', 'org_id', 'data_source_id', 'query_hash', 'runtime', 'retrieved_at')
+@generic_repr('id', 'org_id', 'data_source_id', 'query_hash', 'runtime', 'retrieved_at', 'data_storage')
 class QueryResult(db.Model, BelongsToOrgMixin):
     id = Column(db.Integer, primary_key=True)
     org_id = Column(db.Integer, db.ForeignKey('organizations.id'))
@@ -241,11 +242,28 @@ class QueryResult(db.Model, BelongsToOrgMixin):
     data_source = db.relationship(DataSource, backref=backref('query_results'))
     query_hash = Column(db.String(32), index=True)
     query_text = Column('query', db.Text)
-    data = Column(db.Text)
+    # dont cary big object around. call get_data()! only when its needed!!
+    data = Column(db.Text, nullable=True)
     runtime = Column(postgresql.DOUBLE_PRECISION)
     retrieved_at = Column(db.DateTime(True))
+    data_handler = Column('data_handler', db.Text, default=settings.QUERY_RESULTS_STORAGE_TYPE)
 
     __tablename__ = 'query_results'
+
+    # @staticmethod
+    def result_data_handler(self):
+        result_data_handlers = {
+            "db": QueryResultDbData,
+            "file": QueryResultFileData,
+            # "s3": QueryResultS3Data  @TODO
+        }
+        if not self.data_handler:
+            self.data_handler = settings.QUERY_RESULTS_STORAGE_TYPE or 'db'
+        # set storage type for query_result.data object
+        __data_handler_class = result_data_handlers.get(self.data_handler)
+        # init the class responsible of handling result_data
+        logging.info("Using (%s) class as result data handler!", __data_handler_class)
+        return __data_handler_class()
 
     def __str__(self):
         return u"%d | %s | %s" % (self.id, self.query_hash, self.retrieved_at)
@@ -255,11 +273,29 @@ class QueryResult(db.Model, BelongsToOrgMixin):
             'id': self.id,
             'query_hash': self.query_hash,
             'query': self.query_text,
-            'data': json_loads(self.data),
+            'data': json_loads(self.get_data()),
             'data_source_id': self.data_source_id,
             'runtime': self.runtime,
             'retrieved_at': self.retrieved_at
         }
+
+    def get_data(self):
+        return self.result_data_handler().get(self.id,self.data_source_id)
+    
+    def delete(self):
+        self.result_data_handler().delete(self.id,self.data_source_id)
+        res = db.session.delete(self)
+        db.session.commit()
+        return res
+
+    def save(self):
+        if self.id == None:
+            _data=self.data
+            self.data=None
+            db.session.add(self)
+            db.session.flush() # after flush(), parent object would be automatically
+                 # assigned with a unique primary key to its id field
+            self.result_data_handler().save(self.id, self.data_source_id, _data)
 
     @classmethod
     def unused(cls, days=7):
@@ -302,14 +338,19 @@ class QueryResult(db.Model, BelongsToOrgMixin):
                            runtime=run_time,
                            data_source=data_source,
                            retrieved_at=retrieved_at,
-                           data=data)
-        db.session.add(query_result)
+                           data=data,
+                           data_handler = settings.QUERY_RESULTS_STORAGE_TYPE or 'db'
+                           )
+
+        query_result.save()
         logging.info("Inserted query (%s) data; id=%s", query_hash, query_result.id)
         # TODO: Investigate how big an impact this select-before-update makes.
         queries = Query.query.filter(
             Query.query_hash == query_hash,
             Query.data_source == data_source
         )
+        # @TODO do we need to delete qury result data before we repoint its result!!
+        # probably orphan resultsets will be cleaned up by cleanup process! after 7 days! so no action needed here!?!
         for q in queries:
             q.latest_query_data = query_result
             # don't auto-update the updated_at timestamp
@@ -327,7 +368,7 @@ class QueryResult(db.Model, BelongsToOrgMixin):
     def make_csv_content(self):
         s = cStringIO.StringIO()
 
-        query_data = json_loads(self.data)
+        query_data = json_loads(self.get_data())
         writer = csv.DictWriter(s, extrasaction="ignore", fieldnames=[col['name'] for col in query_data['columns']])
         writer.writer = utils.UnicodeWriter(s)
         writer.writeheader()
@@ -339,7 +380,7 @@ class QueryResult(db.Model, BelongsToOrgMixin):
     def make_excel_content(self):
         s = cStringIO.StringIO()
 
-        query_data = json_loads(self.data)
+        query_data = json_loads(self.get_data())
         book = xlsxwriter.Workbook(s, {'constant_memory': True})
         sheet = book.add_worksheet("result")
 
@@ -744,7 +785,7 @@ class Alert(TimestampMixin, BelongsToOrgMixin, db.Model):
         return super(Alert, cls).get_by_id_and_org(object_id, org, Query)
 
     def evaluate(self):
-        data = json_loads(self.query_rel.latest_query_data.data)
+        data = json_loads(self.query_rel.latest_query_data.get_data())
 
         if data['rows'] and self.options['column'] in data['rows'][0]:
             value = data['rows'][0][self.options['column']]
