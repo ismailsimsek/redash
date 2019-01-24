@@ -6,6 +6,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
 class QueryResultData(object):
 
     def get(self, id, data_source_id):
@@ -20,7 +21,7 @@ class QueryResultData(object):
 
 class QueryResultDbData(QueryResultData, db.Model):
     id = Column(db.Integer, primary_key=True, autoincrement=False, nullable=False)
-    data = Column(db.Text,nullable=False,default='{}')
+    data = Column(db.Text, nullable=False, default='{}')
 
     __tablename__ = 'query_resultdata'
 
@@ -37,18 +38,19 @@ class QueryResultDbData(QueryResultData, db.Model):
         return True
 
     def save(self, id, data_source_id, data):
-        db.session.merge(QueryResultDbData(id=id,data=data or '{}'))
+        db.session.merge(QueryResultDbData(id=id, data=data or '{}'))
         db.session.commit()
         return True
+
 
 class QueryResultFileData(QueryResultData):
 
     def get(self, id, data_source_id):
-        data_file=self._get_file_path(id, data_source_id)
+        data_file = self._get_file_path(id, data_source_id)
 
         if os.path.isfile(data_file):
             data = cPickle.load(open(data_file, "rb"))
-        else :
+        else:
             data = '{}';
         return data
 
@@ -60,14 +62,14 @@ class QueryResultFileData(QueryResultData):
         return True
 
     def save(self, id, data_source_id, data):
-        logging.error("dumping data"+str(data))
-        print ("dumping data"+str(data))
-        print ("dumping data"+str(self._get_file_path(id, data_source_id)))
-        cPickle.dump(data, open(self._get_file_path(id, data_source_id), "wb"),protocol=2)
+        logging.error("dumping data" + str(data))
+        print ("dumping data" + str(data))
+        print ("dumping data" + str(self._get_file_path(id, data_source_id)))
+        cPickle.dump(data, open(self._get_file_path(id, data_source_id), "wb"), protocol=2)
         return True
 
     def _get_file_path(self, id, data_source_id):
-        result_directory = os.path.join(settings.QUERY_RESULTS_STORAGE_FILE_DIR,str(data_source_id))
+        result_directory = os.path.join(settings.QUERY_RESULTS_STORAGE_FILE_DIR, str(data_source_id))
         if not os.path.exists(result_directory):
             os.makedirs(result_directory)
-        return os.path.join(result_directory,str(id)+".pkl")
+        return os.path.join(result_directory, str(id) + ".pkl")
