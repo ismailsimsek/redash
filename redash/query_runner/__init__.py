@@ -5,6 +5,7 @@ import requests
 
 from redash import settings
 from redash.utils import json_loads
+from redash.models.query_result_data import QueryResultDataFactory
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +136,14 @@ class BaseSQLQueryRunner(BaseQueryRunner):
         if settings.SCHEMA_RUN_TABLE_SIZE_CALCULATIONS and get_stats:
             self._get_tables_stats(schema_dict)
         return schema_dict.values()
+
+
+    def handle_result_data(self, cursor, columns):
+        # @TODO all stream ready query_runner runners shuld use QueryResultDataFactory
+        # if not then they can override this function and use old behaviour which will be 'db'
+        data_handler=QueryResultDataFactory().get_handler()
+        json_data = data_handler.save(cursor,columns)
+        return json_data , data_handler
 
     def _get_tables(self, schema_dict):
         return []

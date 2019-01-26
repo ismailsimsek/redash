@@ -233,7 +233,7 @@ class DataSourceGroup(db.Model):
 
 
 @python_2_unicode_compatible
-@generic_repr('id', 'org_id', 'data_source_id', 'query_hash', 'runtime', 'retrieved_at', 'data_storage')
+@generic_repr('id', 'org_id', 'data_source_id', 'query_hash', 'runtime', 'retrieved_at', 'data_handler')
 class QueryResult(db.Model, BelongsToOrgMixin):
     id = Column(db.Integer, primary_key=True)
     org_id = Column(db.Integer, db.ForeignKey('organizations.id'))
@@ -242,28 +242,12 @@ class QueryResult(db.Model, BelongsToOrgMixin):
     data_source = db.relationship(DataSource, backref=backref('query_results'))
     query_hash = Column(db.String(32), index=True)
     query_text = Column('query', db.Text)
-    # dont cary big object around. call get_data()! only when its needed!!
-    data = Column(db.Text, nullable=True)
+    data = Column(db.Text)
     runtime = Column(postgresql.DOUBLE_PRECISION)
     retrieved_at = Column(db.DateTime(True))
     data_handler = Column('data_handler', db.Text, default=settings.QUERY_RESULTS_STORAGE_TYPE)
 
     __tablename__ = 'query_results'
-
-    # @staticmethod
-    def result_data_handler(self):
-        result_data_handlers = {
-            "db": QueryResultDbData,
-            "file": QueryResultFileData,
-            # "s3": QueryResultS3Data  @TODO
-        }
-        if not self.data_handler:
-            self.data_handler = settings.QUERY_RESULTS_STORAGE_TYPE or 'db'
-        # set storage type for query_result.data object
-        __data_handler_class = result_data_handlers.get(self.data_handler)
-        # init the class responsible of handling result_data
-        logging.info("Using (%s) class as result data handler!", __data_handler_class)
-        return __data_handler_class()
 
     def __str__(self):
         return u"%d | %s | %s" % (self.id, self.query_hash, self.retrieved_at)
@@ -273,29 +257,31 @@ class QueryResult(db.Model, BelongsToOrgMixin):
             'id': self.id,
             'query_hash': self.query_hash,
             'query': self.query_text,
-            'data': json_loads(self.get_data()),
+            'data': json_loads(self.get_data()), # ???? @TODO 
             'data_source_id': self.data_source_id,
             'runtime': self.runtime,
             'retrieved_at': self.retrieved_at
         }
 
     def get_data(self):
-        return self.result_data_handler().get(self.id, self.data_source_id)
+        return QueryResultDataFactory.get_handler(self.data_handler,self.data).get()# @TODO !!? self.data.filename
 
     def delete(self):
-        self.result_data_handler().delete(self.id, self.data_source_id)
+        QueryResultDataFactory.get_handler(self.data_handler, self.data).delete()
         res = db.session.delete(self)
         db.session.commit()
         return res
 
+    """
     def save(self):
         if self.id == None:
-            _data = self.data
-            self.data = None
+            _data=self.data
+            self.data=None
             db.session.add(self)
-            db.session.flush()  # after flush(), parent object would be automatically
-            # assigned with a unique primary key to its id field
+            db.session.flush() # after flush(), parent object would be automatically
+                 # assigned with a unique primary key to its id field
             self.result_data_handler().save(self.id, self.data_source_id, _data)
+    """
 
     @classmethod
     def unused(cls, days=7):
@@ -305,7 +291,7 @@ class QueryResult(db.Model, BelongsToOrgMixin):
                 Query.id.is_(None),
                 cls.retrieved_at < age_threshold
             )
-                .outerjoin(Query)
+            .outerjoin(Query)
         ).options(load_only('id'))
 
     @classmethod
@@ -339,10 +325,8 @@ class QueryResult(db.Model, BelongsToOrgMixin):
                            data_source=data_source,
                            retrieved_at=retrieved_at,
                            data=data,
-                           data_handler=settings.QUERY_RESULTS_STORAGE_TYPE or 'db'
-                           )
-
-        query_result.save()
+                           data_handler = settings.QUERY_RESULTS_STORAGE_TYPE or 'db')
+        db.session.add(query_result)
         logging.info("Inserted query (%s) data; id=%s", query_hash, query_result.id)
         # TODO: Investigate how big an impact this select-before-update makes.
         queries = Query.query.filter(
@@ -392,7 +376,7 @@ class QueryResult(db.Model, BelongsToOrgMixin):
         for (r, row) in enumerate(query_data['rows']):
             for (c, name) in enumerate(column_names):
                 v = row.get(name)
-                if isinstance(v, list) or isinstance(v, dict):
+                if isinstance(v, list):
                     v = str(v).encode('utf-8')
                 sheet.write(r + 1, c, v)
 
@@ -429,7 +413,7 @@ def should_schedule_next(previous_iteration, now, interval, time=None, day_of_we
         next_iteration = (previous_iteration + datetime.timedelta(days=days_delay) +
                           datetime.timedelta(days=days_to_add)).replace(hour=hour, minute=minute)
     if failures:
-        next_iteration += datetime.timedelta(minutes=2 ** failures)
+        next_iteration += datetime.timedelta(minutes=2**failures)
     return now > next_iteration
 
 
@@ -510,18 +494,18 @@ class Query(ChangeTrackingMixin, TimestampMixin, BelongsToOrgMixin, db.Model):
     def all_queries(cls, group_ids, user_id=None, drafts=False):
         query_ids = (
             db.session
-                .query(distinct(cls.id))
-                .join(
+            .query(distinct(cls.id))
+            .join(
                 DataSourceGroup,
                 Query.data_source_id == DataSourceGroup.data_source_id
             )
-                .filter(Query.is_archived == False)
-                .filter(DataSourceGroup.group_id.in_(group_ids))
+            .filter(Query.is_archived == False)
+            .filter(DataSourceGroup.group_id.in_(group_ids))
         )
         q = (
             cls
-                .query
-                .options(
+            .query
+            .options(
                 joinedload(Query.user),
                 joinedload(
                     Query.latest_query_data
@@ -530,18 +514,18 @@ class Query(ChangeTrackingMixin, TimestampMixin, BelongsToOrgMixin, db.Model):
                     'retrieved_at',
                 )
             )
-                .filter(cls.id.in_(query_ids))
-                # Adding outer joins to be able to order by relationship
-                .outerjoin(User, User.id == Query.user_id)
-                .outerjoin(
+            .filter(cls.id.in_(query_ids))
+            # Adding outer joins to be able to order by relationship
+            .outerjoin(User, User.id == Query.user_id)
+            .outerjoin(
                 QueryResult,
                 QueryResult.id == Query.latest_query_data_id
             )
-                .options(
+            .options(
                 contains_eager(Query.user),
                 contains_eager(Query.latest_query_data),
             )
-                .order_by(Query.created_at.desc())
+            .order_by(Query.created_at.desc())
         )
 
         if not drafts:
@@ -578,10 +562,10 @@ class Query(ChangeTrackingMixin, TimestampMixin, BelongsToOrgMixin, db.Model):
 
         query = (
             db.session
-                .query(tag_column, usage_count)
-                .group_by(tag_column)
-                .filter(Query.id.in_(queries.options(load_only('id'))))
-                .order_by(usage_count.desc())
+            .query(tag_column, usage_count)
+            .group_by(tag_column)
+            .filter(Query.id.in_(queries.options(load_only('id'))))
+            .order_by(usage_count.desc())
         )
         return query
 
@@ -592,10 +576,10 @@ class Query(ChangeTrackingMixin, TimestampMixin, BelongsToOrgMixin, db.Model):
     @classmethod
     def outdated_queries(cls):
         queries = (Query.query
-                   .options(joinedload(Query.latest_query_data).load_only('retrieved_at'))
-                   .filter(Query.schedule.isnot(None))
-                   .order_by(Query.id))
-
+                        .options(joinedload(Query.latest_query_data).load_only('retrieved_at'))
+                        .filter(Query.schedule.isnot(None))
+                        .order_by(Query.id))
+        
         now = utils.utcnow()
         outdated_queries = {}
         scheduled_queries_executions.refresh()
@@ -604,8 +588,8 @@ class Query(ChangeTrackingMixin, TimestampMixin, BelongsToOrgMixin, db.Model):
             schedule_until = pytz.utc.localize(datetime.datetime.strptime(
                 query.schedule['until'], '%Y-%m-%d')) if query.schedule['until'] else None
             if (query.schedule['interval'] == None or (
-                schedule_until != None and (
-                schedule_until <= now))):
+                    schedule_until != None and (
+                    schedule_until <= now))):
                 continue
 
             if query.latest_query_data:
@@ -639,13 +623,13 @@ class Query(ChangeTrackingMixin, TimestampMixin, BelongsToOrgMixin, db.Model):
                  .join(Event, Query.id == Event.object_id.cast(db.Integer))
                  .join(DataSourceGroup, Query.data_source_id == DataSourceGroup.data_source_id)
                  .filter(
-            Event.action.in_(['edit', 'execute', 'edit_name',
-                              'edit_description', 'view_source']),
-            Event.object_id != None,
-            Event.object_type == 'query',
-            DataSourceGroup.group_id.in_(group_ids),
-            or_(Query.is_draft == False, Query.user_id == user_id),
-            Query.is_archived == False)
+                     Event.action.in_(['edit', 'execute', 'edit_name',
+                                       'edit_description', 'view_source']),
+                     Event.object_id != None,
+                     Event.object_type == 'query',
+                     DataSourceGroup.group_id.in_(group_ids),
+                     or_(Query.is_draft == False, Query.user_id == user_id),
+                     Query.is_archived == False)
                  .group_by(Event.object_id, Query.id)
                  .order_by(db.desc(db.func.count(0))))
 
@@ -741,9 +725,7 @@ class Favorite(TimestampMixin, db.Model):
             return []
 
         object_type = text_type(objects[0].__class__.__name__)
-        return map(lambda fav: fav.object_id,
-                   cls.query.filter(cls.object_id.in_(map(lambda o: o.id, objects)), cls.object_type == object_type,
-                                    cls.user_id == user))
+        return map(lambda fav: fav.object_id, cls.query.filter(cls.object_id.in_(map(lambda o: o.id, objects)), cls.object_type == object_type, cls.user_id == user))
 
 
 @generic_repr('id', 'name', 'query_id', 'user_id', 'state', 'last_triggered_at', 'rearm')
@@ -770,16 +752,16 @@ class Alert(TimestampMixin, BelongsToOrgMixin, db.Model):
     def all(cls, group_ids):
         return (
             cls.query
-                .options(
+            .options(
                 joinedload(Alert.user),
                 joinedload(Alert.query_rel),
             )
-                .join(Query)
-                .join(
+            .join(Query)
+            .join(
                 DataSourceGroup,
                 DataSourceGroup.data_source_id == Query.data_source_id
             )
-                .filter(DataSourceGroup.group_id.in_(group_ids))
+            .filter(DataSourceGroup.group_id.in_(group_ids))
         )
 
     @classmethod
@@ -855,20 +837,20 @@ class Dashboard(ChangeTrackingMixin, TimestampMixin, BelongsToOrgMixin, db.Model
     def all(cls, org, group_ids, user_id):
         query = (
             Dashboard.query
-                .options(
+            .options(
                 subqueryload(Dashboard.user).load_only('_profile_image_url', 'name'),
             )
-                .outerjoin(Widget)
-                .outerjoin(Visualization)
-                .outerjoin(Query)
-                .outerjoin(DataSourceGroup, Query.data_source_id == DataSourceGroup.data_source_id)
-                .filter(
+            .outerjoin(Widget)
+            .outerjoin(Visualization)
+            .outerjoin(Query)
+            .outerjoin(DataSourceGroup, Query.data_source_id == DataSourceGroup.data_source_id)
+            .filter(
                 Dashboard.is_archived == False,
                 (DataSourceGroup.group_id.in_(group_ids) |
                  (Dashboard.user_id == user_id) |
                  ((Widget.dashboard != None) & (Widget.visualization == None))),
                 Dashboard.org == org)
-                .distinct())
+            .distinct())
 
         query = query.filter(or_(Dashboard.user_id == user_id, Dashboard.is_draft == False))
 
@@ -888,10 +870,10 @@ class Dashboard(ChangeTrackingMixin, TimestampMixin, BelongsToOrgMixin, db.Model
 
         query = (
             db.session
-                .query(tag_column, usage_count)
-                .group_by(tag_column)
-                .filter(Dashboard.id.in_(dashboards.options(load_only('id'))))
-                .order_by(usage_count.desc())
+            .query(tag_column, usage_count)
+            .group_by(tag_column)
+            .filter(Dashboard.id.in_(dashboards.options(load_only('id'))))
+            .order_by(usage_count.desc())
         )
         return query
 
@@ -1196,8 +1178,7 @@ class QuerySnippet(TimestampMixin, db.Model, BelongsToOrgMixin):
 def init_db():
     default_org = Organization(name="Default", slug='default', settings={})
     admin_group = Group(name='admin', permissions=['admin', 'super_admin'], org=default_org, type=Group.BUILTIN_GROUP)
-    default_group = Group(name='default', permissions=Group.DEFAULT_PERMISSIONS, org=default_org,
-                          type=Group.BUILTIN_GROUP)
+    default_group = Group(name='default', permissions=Group.DEFAULT_PERMISSIONS, org=default_org, type=Group.BUILTIN_GROUP)
 
     db.session.add_all([default_org, admin_group, default_group])
     # XXX remove after fixing User.group_ids
